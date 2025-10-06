@@ -1,6 +1,7 @@
 package com.vodchyts.backend.feature.controller;
 
 import com.vodchyts.backend.feature.dto.LoginRequest;
+import com.vodchyts.backend.feature.dto.LoginResponse;
 import com.vodchyts.backend.feature.dto.RegisterRequest;
 import com.vodchyts.backend.feature.service.AuthService;
 import org.springframework.http.ResponseEntity;
@@ -25,7 +26,7 @@ public class AuthController {
 
 
     @PostMapping("/login")
-    public Mono<ResponseEntity<String>> login(@RequestBody LoginRequest request) {
+    public Mono<ResponseEntity<LoginResponse>> login(@RequestBody LoginRequest request) {
         return authService.login(request.login(), request.password())
                 .map(ResponseEntity::ok);
     }

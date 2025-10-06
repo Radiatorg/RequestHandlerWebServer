@@ -1,5 +1,6 @@
 package com.vodchyts.backend.feature.service;
 
+import com.vodchyts.backend.feature.dto.LoginResponse;
 import com.vodchyts.backend.feature.entity.User;
 import com.vodchyts.backend.feature.repository.ReactiveRoleRepository;
 import com.vodchyts.backend.feature.repository.ReactiveUserRepository;
@@ -42,7 +43,7 @@ public class AuthService {
                 });
     }
 
-    public Mono<String> login(String login, String password) {
+    public Mono<LoginResponse> login(String login, String password) {
         return userRepository.findByLogin(login)
                 .switchIfEmpty(Mono.error(new RuntimeException("User not found")))
                 .flatMap(user -> {
@@ -50,7 +51,11 @@ public class AuthService {
                         return Mono.error(new RuntimeException("Invalid password"));
                     }
                     return roleRepository.findById(user.getRoleID())
-                            .map(role -> jwtUtils.generateToken(user.getLogin(), role.getRoleName()));
+                            .map(role -> new LoginResponse(
+                                    jwtUtils.generateToken(user.getLogin(), role.getRoleName()),
+                                    user.getLogin(),
+                                    role.getRoleName()
+                            ));
                 });
     }
 }
