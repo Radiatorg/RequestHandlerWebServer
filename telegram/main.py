@@ -21,7 +21,10 @@ from handlers import (
     editor_main_callback, editor_select_shop, editor_select_contractor,
     editor_select_work, editor_select_urgency, editor_select_status, editor_input_text,
     EDITOR_MAIN_MENU, EDITOR_SELECT_SHOP, EDITOR_SELECT_CONTRACTOR,
-    EDITOR_SELECT_WORK, EDITOR_SELECT_URGENCY, EDITOR_INPUT_TEXT, EDITOR_SELECT_STATUS
+    EDITOR_SELECT_WORK, EDITOR_SELECT_URGENCY, EDITOR_INPUT_TEXT, EDITOR_SELECT_STATUS,
+    start_delete_comment_handler, confirm_delete_comment_handler,
+    start_delete_photo_handler, preview_delete_photo_handler, finalize_delete_photo_handler,
+    DELETE_COMMENT_SELECT, DELETE_PHOTO_SELECT
 )
 
 
@@ -63,7 +66,23 @@ def main():
             ],
             # Меню детального просмотра заявки
             VIEW_DETAILS: [
-                CallbackQueryHandler(action_callback_handler, pattern="^act_")
+                CallbackQueryHandler(action_callback_handler, pattern="^act_"),
+                # Обработчики переходов к удалению (вызываются из action_callback_handler, но можно и напрямую)
+                CallbackQueryHandler(action_callback_handler, pattern="^start_del_")
+            ],
+
+            # --- НОВЫЕ СОСТОЯНИЯ ---
+            DELETE_COMMENT_SELECT: [
+                CallbackQueryHandler(confirm_delete_comment_handler, pattern="^conf_del_cmt_"),
+                CallbackQueryHandler(action_callback_handler, pattern="^act_")  # Для кнопки "Отмена"
+            ],
+
+            DELETE_PHOTO_SELECT: [
+                CallbackQueryHandler(preview_delete_photo_handler, pattern="^preview_del_img_"),
+                CallbackQueryHandler(finalize_delete_photo_handler, pattern="^fin_del_img_"),
+                CallbackQueryHandler(action_callback_handler, pattern="^start_del_img_"),
+                # Кнопка "Назад к списку" (в preview)
+                CallbackQueryHandler(action_callback_handler, pattern="^act_")  # Кнопка "Отмена" (в списке)
             ],
             # Вложенные состояния для действий
             VIEW_SET_SEARCH_TERM: [MessageHandler(filters.TEXT & ~filters.COMMAND, view_search_handler)],
