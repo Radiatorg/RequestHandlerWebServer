@@ -469,34 +469,28 @@ public class RequestService {
                     }
                     request.setStatus(dto.status());
 
-// === ЛОГИКА ПЕРЕСЧЕТА ПРОСРОЧКИ И УВЕДОМЛЕНИЯ ===
+                    // === ЛОГИКА ПЕРЕСЧЕТА ПРОСРОЧКИ И УВЕДОМЛЕНИЯ ===
 
-// 1. Запоминаем, была ли она просрочена ДО изменений
+                    // 1. Запоминаем, была ли она просрочена ДО изменений
                     boolean wasOverdue = Boolean.TRUE.equals(request.getIsOverdue());
+                    Integer daysForTask = isCustomizable ? dto.customDays() : newUrgency.getDefaultDays();
 
-                    if (!"In work".equalsIgnoreCase(request.getStatus())) {
-                        request.setIsOverdue(false);
-                        // Если она была просрочена, а теперь мы её закрыли или выполнили — это хорошо, уведомлять о снятии просрочки обычно не нужно (статус и так поменялся)
-                    } else {
-                        Integer daysForTask = isCustomizable ? dto.customDays() : newUrgency.getDefaultDays();
+                    if (daysForTask != null) {
+                        // Всегда считаем дедлайн, независимо от статуса
+                        LocalDateTime deadline = request.getCreatedAt().plusDays(daysForTask);
+                        boolean isNowOverdue = LocalDateTime.now().isAfter(deadline);
 
-                        if (daysForTask != null) {
-                            LocalDateTime deadline = request.getCreatedAt().plusDays(daysForTask);
-                            boolean isNowOverdue = LocalDateTime.now().isAfter(deadline);
+                        request.setIsOverdue(isNowOverdue);
 
-                            request.setIsOverdue(isNowOverdue);
-
-                            // 2. Сравниваем старое и новое состояние
+                        if ("In work".equalsIgnoreCase(request.getStatus())) {
                             if (!wasOverdue && isNowOverdue) {
-                                // Если раньше НЕ была просрочена, а теперь СТАЛА
                                 changes.add("❗️ *Внимание:* Срок выполнения истек\\!");
                             } else if (wasOverdue && !isNowOverdue) {
-                                // Если БЫЛА просрочена, а мы увеличили дни и она перестала быть такой
                                 changes.add("✅ *Срок:* Просрочка устранена \\(время добавлено\\)");
                             }
-                        } else {
-                            request.setIsOverdue(false);
                         }
+                    } else {
+                        request.setIsOverdue(false);
                     }
 
                     Mono<Request> updatedRequestMono = requestRepository.save(request);
@@ -683,8 +677,34 @@ public class RequestService {
                     if (!"In work".equalsIgnoreCase(request.getStatus())) {
                         return Mono.error(new OperationNotAllowedException("Заявку можно завершить только из статуса 'В работе'."));
                     }
+
+                    // 1. Ставим статус
                     request.setStatus("Done");
-                    return requestRepository.save(request);
+
+                    // 2. Считаем просрочку на момент завершения
+                    Mono<UrgencyCategory> urgencyMono = urgencyCategoryRepository.findById(request.getUrgencyID());
+                    Mono<RequestCustomDay> customDayMono = customDayRepository.findByRequestID(requestId)
+                            .defaultIfEmpty(new RequestCustomDay());
+
+                    return Mono.zip(urgencyMono, customDayMono).flatMap(tuple -> {
+                        UrgencyCategory urgency = tuple.getT1();
+                        RequestCustomDay customDay = tuple.getT2();
+
+                        Integer daysForTask = "Customizable".equalsIgnoreCase(urgency.getUrgencyName())
+                                ? customDay.getDays()
+                                : urgency.getDefaultDays();
+
+                        boolean isOverdue = false;
+                        if (daysForTask != null) {
+                            LocalDateTime deadline = request.getCreatedAt().plusDays(daysForTask);
+                            isOverdue = LocalDateTime.now().isAfter(deadline);
+                        }
+
+                        // Сохраняем флаг (просрочено или нет)
+                        request.setIsOverdue(isOverdue);
+
+                        return requestRepository.save(request);
+                    });
                 })
                 .flatMap(savedRequest -> enrichRequest(savedRequest.getRequestID()));
     }

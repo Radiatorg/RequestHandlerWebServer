@@ -65,7 +65,12 @@ public class RequestUpdateService {
     private Mono<Long> updateOverdueStatus(boolean sendNotification) {
         log.info("Проверка статусов просрочки...");
 
-        Flux<Request> activeRequests = template.select(query(where("Status").is("In work")), Request.class);
+        // ИЗМЕНЕНИЕ 1: Берем и "В работе", и "Выполнено"
+        Flux<Request> requestsToCheck = template.select(
+                query(where("Status").in("In work", "Done")),
+                Request.class
+        );
+
         Mono<Map<Integer, UrgencyCategory>> urgencyMapMono = urgencyCategoryRepository.findAll().collectMap(UrgencyCategory::getUrgencyID);
         Mono<Map<Integer, RequestCustomDay>> customDaysMapMono = customDayRepository.findAll().collectMap(RequestCustomDay::getRequestID);
 
@@ -74,7 +79,7 @@ public class RequestUpdateService {
                     Map<Integer, UrgencyCategory> urgencyMap = tuple.getT1();
                     Map<Integer, RequestCustomDay> customDaysMap = tuple.getT2();
 
-                    return activeRequests.flatMap(request -> {
+                    return requestsToCheck.flatMap(request -> {
                         UrgencyCategory urgency = urgencyMap.get(request.getUrgencyID());
                         if (urgency == null) return Mono.empty();
 
@@ -87,22 +92,24 @@ public class RequestUpdateService {
                         LocalDateTime deadline = request.getCreatedAt().plusDays(daysForTask);
                         boolean isNowOverdue = LocalDateTime.now().isAfter(deadline);
 
-                        // Логика: Если статус меняется с False на True -> это НОВАЯ просрочка
+                        // Логика: Если статус меняется
                         boolean isTransitionToOverdue = isNowOverdue && (request.getIsOverdue() == null || !request.getIsOverdue());
 
+                        // Если статус просрочки в базе отличается от реального - обновляем
                         if (isNowOverdue != (request.getIsOverdue() != null && request.getIsOverdue())) {
                             request.setIsOverdue(isNowOverdue);
 
-                            // Сохраняем в БД
                             return requestRepository.save(request)
                                     .flatMap(savedReq -> {
-// 1. Вычисляем реальное количество дней просрочки
-                                        long realDaysOverdue = Duration.between(deadline, LocalDateTime.now()).toDays();
-// Если просрочка меньше суток (например, 1 час), считаем как 1 день, иначе берем реальное число
-                                        long daysReported = Math.max(1, realDaysOverdue);
+                                        // ИЗМЕНЕНИЕ 2: Уведомляем ТОЛЬКО если заявка активна ("In work")
+                                        if ("In work".equalsIgnoreCase(savedReq.getStatus()) &&
+                                                isTransitionToOverdue &&
+                                                sendNotification &&
+                                                !isWeekend()) {
 
-                                        if (isTransitionToOverdue && sendNotification && !isWeekend()) {
-                                            return sendOverdueAlert(savedReq, daysReported); // <--- ПЕРЕДАЕМ ПЕРЕМЕННУЮ
+                                            long realDaysOverdue = Duration.between(deadline, LocalDateTime.now()).toDays();
+                                            long daysReported = Math.max(1, realDaysOverdue);
+                                            return sendOverdueAlert(savedReq, daysReported);
                                         }
                                         return Mono.just(savedReq);
                                     });
@@ -111,9 +118,8 @@ public class RequestUpdateService {
                     });
                 })
                 .count()
-                .doOnSuccess(c -> log.info("Обновлено заявок: {}", c));
+                .doOnSuccess(c -> log.info("Обновлено заявок (просрочка): {}", c));
     }
-
 
     // 2. ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ (Только по будням в 10:00)
     @Scheduled(cron = "0 0 10 * * MON-FRI")
