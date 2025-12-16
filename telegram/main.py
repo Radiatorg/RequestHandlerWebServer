@@ -141,7 +141,15 @@ async def main():
         return
 
     context_types = ContextTypes(context=Context)
-    application = Application.builder().token(BOT_TOKEN).context_types(context_types).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .context_types(context_types)
+        .read_timeout(30)  # Увеличиваем время ожидания чтения
+        .write_timeout(30) # Увеличиваем время ожидания записи
+        .connect_timeout(30)
+        .build()
+    )
 
     # --- Регистрация хендлеров (ConversationHandler'ы) ---
     create_conv = ConversationHandler(

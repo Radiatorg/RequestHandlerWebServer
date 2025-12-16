@@ -984,8 +984,13 @@ async def add_comment_handler(update: Update, context: Context) -> int:
     request_id = context.user_data.get('current_request_id')
     user_id = update.effective_user.id
 
-    await update.message.delete()
+    # 1. Удаляем сообщение пользователя с текстом комментария
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
+    # 2. Удаляем сообщение бота "Введите текст..."
     comment_input_msg_id = context.user_data.get('comment_input_message_id')
     if comment_input_msg_id:
         try:
@@ -994,85 +999,20 @@ async def add_comment_handler(update: Update, context: Context) -> int:
             logger.warning(f"Не удалось удалить сообщение ввода комментария: {e}")
         context.user_data.pop('comment_input_message_id', None)
 
+    # 3. Отправляем комментарий на сервер
     response = await api_client.add_comment(request_id, user_id, comment_text)
+
     if not response:
         await context.bot.send_message(update.effective_chat.id, "❌ Не удалось добавить комментарий.")
-    else:
-        escaped_comment = escape_markdown(comment_text[:100])
-        if len(comment_text) > 100:
-            escaped_comment += "..."
-        message_text = (
-            f"✅ *Комментарий добавлен к заявке \\#{request_id}*\n\n"
-            f"*Комментарий:*\n{escaped_comment}"
-        )
-        sent_message = await context.bot.send_message(
-            update.effective_chat.id,
-            message_text,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-        async def delete_notification():
-            try:
-                await asyncio.sleep(10)
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=sent_message.message_id
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось удалить уведомление: {e}")
-
-        asyncio.create_task(delete_notification())
+        # Если ошибка, всё равно пытаемся восстановить меню
+        await restore_request_menu(context, update.effective_chat.id, user_id, request_id)
+        return VIEW_DETAILS
 
     _invalidate_requests_cache(context)
 
-    user_info = context.user_data.get('user_info') or await api_client.get_user_by_telegram_id(user_id)
-    if not user_info:
-        return VIEW_MAIN_MENU
-
-    request_details = await api_client.get_request_details(user_id, request_id)
-    if not request_details:
-        return VIEW_MAIN_MENU
-
-    context.user_data['current_request_id'] = request_id
-    context.user_data['current_request_details'] = request_details
-    message_text = format_request_details(request_details)
-
-    keyboard = []
-    role, status = user_info.get('roleName'), request_details.get('status')
-
-    action_row = []
-    if request_details.get('commentCount', 0) > 0:
-        action_row.append(InlineKeyboardButton(f"💬 Комментарии ({request_details['commentCount']})",
-                                               callback_data=f"act_comments_{request_id}"))
-    if request_details.get('photoCount', 0) > 0:
-        action_row.append(InlineKeyboardButton(f"🖼️ Просмотр фото ({request_details['photoCount']})",
-                                               callback_data=f"act_photos_{request_id}"))
-    if action_row:
-        keyboard.append(action_row)
-
-    second_action_row = []
-    if role in ['RetailAdmin', 'Contractor'] and status != 'Closed':
-        second_action_row.append(InlineKeyboardButton("➕ Комментарий", callback_data=f"act_add_comment_{request_id}"))
-        second_action_row.append(InlineKeyboardButton("📷 Добавить фото", callback_data=f"act_add_photo_{request_id}"))
-    if role == 'Contractor' and status == 'In work':
-        second_action_row.append(InlineKeyboardButton("✅ Завершить", callback_data=f"act_complete_{request_id}"))
-    if second_action_row:
-        keyboard.append(second_action_row)
-
-    keyboard.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="act_back_list")])
-
-    main_message_id = context.user_data.get('main_message_id')
-    if main_message_id:
-        try:
-            await context.bot.edit_message_text(
-                text=message_text,
-                chat_id=update.effective_chat.id,
-                message_id=main_message_id,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-        except Exception as e:
-            logger.error(f"Ошибка редактирования сообщения: {e}")
+    # 4. ВМЕСТО РЕДАКТИРОВАНИЯ (которое вызывало ошибку) ИСПОЛЬЗУЕМ restore_request_menu
+    # Эта функция отправит НОВОЕ сообщение с актуальным статусом заявки.
+    await restore_request_menu(context, update.effective_chat.id, user_id, request_id)
 
     return VIEW_DETAILS
 
@@ -1150,7 +1090,8 @@ async def process_media_group(context, media_group_id, chat_id, user_id, request
 
 async def finalize_photo_upload(context, chat_id, user_id, request_id, photos):
     """Отправка фото на сервер и восстановление меню."""
-    # Проверка лимита (запрашиваем данные с сервера)
+
+    # 1. Проверка лимита (запрашиваем данные с сервера)
     req_details = await api_client.get_request_details(user_id, request_id)
 
     if req_details:
@@ -1162,86 +1103,83 @@ async def finalize_photo_upload(context, chat_id, user_id, request_id, photos):
                 chat_id=chat_id,
                 text=f"❌ Ошибка: Лимит 10 фото. Уже загружено: {current_count}. Пытались добавить: {incoming_count}."
             )
+            # Удаляем сообщение об ошибке через 5 сек
+            asyncio.create_task(delayed_delete(context, chat_id, error_msg.message_id, 5))
 
-            async def delete_error():
-                await asyncio.sleep(5)
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=error_msg.message_id)
-                except:
-                    pass
-
-            asyncio.create_task(delete_error())
-
-            # Восстанавливаем меню даже при ошибке
+            # Восстанавливаем меню
             await restore_request_menu(context, chat_id, user_id, request_id)
             return VIEW_DETAILS
 
-    # Загрузка
+    # 2. Загрузка фото
     success = await api_client.upload_photos(request_id, user_id, photos)
 
     if success:
         _invalidate_requests_cache(context)
-        message_text = f"✅ *Добавлено фото: {len(photos)} шт\. к заявке \\#{request_id}*"
-        sent_message = await context.bot.send_message(
-            chat_id=chat_id,
-            text=message_text,  # Исправлено message_text=message_text -> text=message_text
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-        async def delete_notification():
-            try:
-                await asyncio.sleep(10)
-                await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
-            except Exception:
-                pass
-
-        asyncio.create_task(delete_notification())
+        # Успешное сообщение убрано, так как сервер пришлет уведомление.
+        # Просто обновляем меню.
     else:
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Не удалось загрузить фото для заявки #{request_id}.")
 
+    # 3. Восстановление меню (ОБЯЗАТЕЛЬНО)
     await restore_request_menu(context, chat_id, user_id, request_id)
     return VIEW_DETAILS
 
 
 async def restore_request_menu(context, chat_id, user_id, request_id):
-    """Восстанавливает сообщение с деталями заявки."""
-    user_info = context.user_data.get('user_info') or await api_client.get_user_by_telegram_id(user_id)
-    req_details = await api_client.get_request_details(user_id, request_id)
+    """Восстанавливает сообщение с деталями заявки. С обработкой ошибок."""
+    try:
+        user_info = context.user_data.get('user_info') or await api_client.get_user_by_telegram_id(user_id)
+        req_details = await api_client.get_request_details(user_id, request_id)
 
-    if not user_info or not req_details:
-        return
+        if not user_info or not req_details:
+            # Если данные не пришли, сообщаем пользователю, чтобы он не гадал
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ Не удалось обновить меню заявки. Попробуйте ввести /start или открыть список заявок заново.")
+            return
 
-    context.user_data['current_request_details'] = req_details
-    message_text = format_request_details(req_details)
+        context.user_data['current_request_details'] = req_details
+        message_text = format_request_details(req_details)
 
-    role, status = user_info.get('roleName'), req_details.get('status')
-    keyboard = []
-    action_row = []
-    if req_details.get('commentCount', 0) > 0:
-        action_row.append(InlineKeyboardButton(f"💬 Комментарии ({req_details['commentCount']})",
-                                               callback_data=f"act_comments_{request_id}"))
-    if req_details.get('photoCount', 0) > 0:
-        action_row.append(InlineKeyboardButton(f"🖼️ Просмотр фото ({req_details['photoCount']})",
-                                               callback_data=f"act_photos_{request_id}"))
-    if action_row: keyboard.append(action_row)
+        role, status = user_info.get('roleName'), req_details.get('status')
+        keyboard = []
+        action_row = []
+        if req_details.get('commentCount', 0) > 0:
+            action_row.append(InlineKeyboardButton(f"💬 Комментарии ({req_details['commentCount']})",
+                                                   callback_data=f"act_comments_{request_id}"))
+        if req_details.get('photoCount', 0) > 0:
+            action_row.append(InlineKeyboardButton(f"🖼️ Фото ({req_details['photoCount']})",
+                                                   callback_data=f"act_photos_{request_id}"))
+        if action_row: keyboard.append(action_row)
 
-    second_action_row = []
-    if role in ['RetailAdmin', 'Contractor'] and status != 'Closed':
-        second_action_row.append(InlineKeyboardButton("➕ Комментарий", callback_data=f"act_add_comment_{request_id}"))
-        second_action_row.append(InlineKeyboardButton("📷 Добавить фото", callback_data=f"act_add_photo_{request_id}"))
-    if role == 'Contractor' and status == 'In work':
-        second_action_row.append(InlineKeyboardButton("✅ Завершить", callback_data=f"act_complete_{request_id}"))
-    if second_action_row: keyboard.append(second_action_row)
+        second_action_row = []
+        if role in ['RetailAdmin', 'Contractor'] and status != 'Closed':
+            second_action_row.append(InlineKeyboardButton("➕ Комментарий", callback_data=f"act_add_comment_{request_id}"))
+            second_action_row.append(InlineKeyboardButton("📷 Добавить фото", callback_data=f"act_add_photo_{request_id}"))
+        if role == 'Contractor' and status == 'In work':
+            second_action_row.append(InlineKeyboardButton("✅ Завершить", callback_data=f"act_complete_{request_id}"))
+        if second_action_row: keyboard.append(second_action_row)
 
-    keyboard.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="act_back_list")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="act_back_list")])
 
-    sent_menu = await context.bot.send_message(
-        chat_id=chat_id,
-        text=message_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-    context.user_data['main_message_id'] = sent_menu.message_id
+        # Отправляем НОВОЕ сообщение с меню
+        sent_menu = await context.bot.send_message(
+            chat_id=chat_id,
+            text=message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        context.user_data['main_message_id'] = sent_menu.message_id
+
+    except Exception as e:
+        logger.error(f"Error restoring menu: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Произошла ошибка при отображении меню.")
+
+
+async def delayed_delete(context, chat_id, message_id, delay=5):
+    await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
 
 
 async def new_request_start(update: Update, context: CallbackContext) -> int:
@@ -1591,17 +1529,24 @@ async def render_editor_menu(update: Update, context: Context):
     keyboard = _get_editor_keyboard(draft, is_new, user_info.get('roleName'))
 
     if update.callback_query:
-        # Пытаемся отредактировать сообщение
+        # Пытаемся отредактировать сообщение (если нажали кнопку)
         try:
             await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         except BadRequest:
-            # Если текст не изменился (например, нажали назад), ничего страшного
             pass
     else:
-        await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        # === ИСПРАВЛЕНИЕ ЗДЕСЬ ===
+        # Используем context.bot.send_message вместо update.message.reply_text
+        # Это позволяет отправить меню, даже если сообщение пользователя было удалено
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+        # =========================
 
     return EDITOR_MAIN_MENU
-
 
 # --- Точки входа ---
 

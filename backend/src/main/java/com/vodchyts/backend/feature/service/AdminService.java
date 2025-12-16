@@ -12,6 +12,7 @@ import com.vodchyts.backend.feature.entity.Role;
 import com.vodchyts.backend.feature.entity.User;
 import com.vodchyts.backend.feature.repository.ReactiveRequestRepository;
 import com.vodchyts.backend.feature.repository.ReactiveRoleRepository;
+import com.vodchyts.backend.feature.repository.ReactiveShopRepository;
 import com.vodchyts.backend.feature.repository.ReactiveUserRepository;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
@@ -35,19 +36,21 @@ public class AdminService {
     private final ReactiveUserRepository userRepository;
     private final ReactiveRoleRepository roleRepository;
     private final ReactiveRequestRepository requestRepository;
+    private final ReactiveShopRepository shopRepository;
     private final PasswordEncoder passwordEncoder;
     private final PasswordValidator passwordValidator;
     private final DatabaseClient databaseClient;
 
     public AdminService(ReactiveUserRepository userRepository,
                         ReactiveRoleRepository roleRepository,
-                        ReactiveRequestRepository requestRepository,
+                        ReactiveRequestRepository requestRepository, ReactiveShopRepository shopRepository,
                         PasswordEncoder passwordEncoder,
                         PasswordValidator passwordValidator,
                         DatabaseClient databaseClient) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.requestRepository = requestRepository;
+        this.shopRepository = shopRepository;
         this.passwordEncoder = passwordEncoder;
         this.passwordValidator = passwordValidator;
         this.databaseClient = databaseClient;
@@ -197,7 +200,14 @@ public class AdminService {
                         // Если роль меняется
                         userMono = roleRepository.findById(user.getRoleID()) // Получаем ТЕКУЩУЮ роль
                                 .flatMap(currentRole -> {
-                                    // Если текущая роль была "Подрядчик"
+                                    if (currentRole.getRoleName().equals(request.roleName())) {
+                                        return Mono.just(currentRole);
+                                    }
+                                    if ("RetailAdmin".equals(currentRole.getRoleName())) {
+                                        return Mono.error(new OperationNotAllowedException(
+                                                "Нельзя изменить роль Администратора. Вы не можете понизить уровень доступа для этой учетной записи."
+                                        ));
+                                    }
                                     if ("Contractor".equals(currentRole.getRoleName())) {
                                         // Проверяем, есть ли активные заявки
                                         return requestRepository.existsByAssignedContractorIDAndStatus(userId, "In work")
@@ -206,6 +216,19 @@ public class AdminService {
                                                         // Если есть, запрещаем смену роли
                                                         return Mono.error(new OperationNotAllowedException(
                                                                 "Нельзя изменить роль: у этого подрядчика есть активные заявки. Сначала переназначьте или завершите их."
+                                                        ));
+                                                    }
+                                                    return Mono.just(currentRole);
+                                                });
+                                    }
+                                    if ("StoreManager".equals(currentRole.getRoleName())) {
+                                        // Проверяем, есть ли магазины, где этот user указан как UserID
+                                        return shopRepository.findAllByUserID(userId)
+                                                .hasElements() // Возвращает true, если найден хотя бы один магазин
+                                                .flatMap(hasShops -> {
+                                                    if (hasShops) {
+                                                        return Mono.error(new OperationNotAllowedException(
+                                                                "Нельзя изменить роль: этот пользователь привязан к магазинам. Сначала снимите его с должности в разделе 'Магазины'."
                                                         ));
                                                     }
                                                     return Mono.just(currentRole);

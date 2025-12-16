@@ -96,9 +96,13 @@ public class RequestUpdateService {
                             // Сохраняем в БД
                             return requestRepository.save(request)
                                     .flatMap(savedReq -> {
-                                        // Если это переход в просрочку И нужно слать уведомления И сегодня не выходной
+// 1. Вычисляем реальное количество дней просрочки
+                                        long realDaysOverdue = Duration.between(deadline, LocalDateTime.now()).toDays();
+// Если просрочка меньше суток (например, 1 час), считаем как 1 день, иначе берем реальное число
+                                        long daysReported = Math.max(1, realDaysOverdue);
+
                                         if (isTransitionToOverdue && sendNotification && !isWeekend()) {
-                                            return sendOverdueAlert(savedReq, 1); // 1й день просрочки (свежая)
+                                            return sendOverdueAlert(savedReq, daysReported); // <--- ПЕРЕДАЕМ ПЕРЕМЕННУЮ
                                         }
                                         return Mono.just(savedReq);
                                     });
@@ -152,11 +156,18 @@ public class RequestUpdateService {
     private Mono<Void> sendOverdueAlert(Request request, long daysOverdue) {
         String icon = daysOverdue == 1 ? "⚠️" : "🔥";
 
-        // 1. Подготавливаем описание и ЭКРАНИРУЕМ его спецсимволы
-        String rawDescription = request.getDescription() != null
-                ? request.getDescription().substring(0, Math.min(request.getDescription().length(), 50)) + "..."
-                : "";
-        // Используем метод из notificationService для экранирования пользовательского текста
+        String desc = request.getDescription();
+        String rawDescription = "";
+
+        if (desc != null) {
+            if (desc.length() > 50) {
+                // Если длинное — обрезаем и добавляем точки
+                rawDescription = desc.substring(0, 50) + "...";
+            } else {
+                // Если короткое — оставляем как есть
+                rawDescription = desc;
+            }
+        }        // Используем метод из notificationService для экранирования пользовательского текста
         String safeDescription = notificationService.escapeMarkdown(rawDescription);
 
         // 2. Формируем сообщение.

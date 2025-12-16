@@ -189,7 +189,7 @@ export default function Requests({ archived = false }) {
         }
     };
 
-const reloadRequests = useCallback(async (silent = false) => {
+    const reloadRequests = useCallback(async (silent = false) => {
         if (!silent) {
             setLoading(true);
             setError(null);
@@ -221,7 +221,7 @@ const reloadRequests = useCallback(async (silent = false) => {
             setRequests(response.data.content);
             setPaginationData({ totalPages: response.data.totalPages, totalItems: response.data.totalItems });
 
-            // Обновляем текущую заявку, если она открыта, используя функциональное обновление
+            // Обновляем текущую заявку, если она открыта (например, изменились комменты)
             setCurrentRequest(prevReq => {
                 if (prevReq) {
                     const updatedReq = response.data.content.find(r => r.requestID === prevReq.requestID);
@@ -241,7 +241,6 @@ const reloadRequests = useCallback(async (silent = false) => {
                 setLoading(false);
             }
         }
-    // ВАЖНО: Убрали currentRequest из этого списка ↓
     }, [archived, searchParamsString, viewMode]);
 
     const SortableHeader = ({ field, children }) => {
@@ -306,6 +305,7 @@ const reloadRequests = useCallback(async (silent = false) => {
         reloadRequests();
     }, [reloadRequests]);
 
+
     const handleFormSubmit = async (formData) => {
         setFormApiError(null);
         setIsSubmitting(true);
@@ -316,8 +316,7 @@ const reloadRequests = useCallback(async (silent = false) => {
                 await createRequest(formData);
             }
             setIsFormOpen(false);
-            
-            reloadRequests(true); 
+            await reloadRequests(true); 
             
         } catch (err) {
             console.error("Ошибка при отправке формы заявки:", err.response || err);
@@ -357,8 +356,6 @@ const reloadRequests = useCallback(async (silent = false) => {
             setIsDetailsOpen(true);
         }
         
-        // ИЗМЕНЕНИЕ: Всегда передаем true (тихий режим), чтобы не появлялся спиннер
-        // и таблица не пропадала, сохраняя позицию скролла.
         reloadRequests(true);
     };
 
@@ -369,7 +366,6 @@ const reloadRequests = useCallback(async (silent = false) => {
             setIsDetailsOpen(true);
         }
 
-        // ИЗМЕНЕНИЕ: Здесь тоже включаем тихий режим.
         reloadRequests(true);
     };
     
@@ -405,26 +401,30 @@ const reloadRequests = useCallback(async (silent = false) => {
 
 
                     {isAdmin && !archived && (
-                        <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
-                            <DialogTrigger asChild><Button onClick={openCreateForm}><PlusCircle className="mr-2 h-4 w-4" /> Создать заявку</Button></DialogTrigger>
-                            <DialogContent className="max-w-3xl">
-                                <DialogHeader>
-                                    <DialogTitle>{currentRequest ? 'Редактировать заявку' : 'Новая заявка'}</DialogTitle>
-                                </DialogHeader>
-                                <RequestForm
-                                    key={currentRequest ? currentRequest.requestID : 'new'}
-                                    currentRequest={currentRequest}
-                                    onSubmit={handleFormSubmit}
-                                    onCancel={() => setIsFormOpen(false)}
-                                    apiError={formApiError}
-                                    shops={shops}
-                                    workCategories={workCategories}
-                                    urgencyCategories={urgencyCategories}
-                                    contractors={contractors}
-                                    isSubmitting={isSubmitting}
-                                />
-                            </DialogContent>
-                        </Dialog>
+                        <>
+                            <Button onClick={openCreateForm}>
+                                <PlusCircle className="mr-2 h-4 w-4" /> Создать заявку
+                            </Button>
+                            <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
+                                <DialogContent className="max-w-3xl">
+                                    <DialogHeader>
+                                        <DialogTitle>{currentRequest ? 'Редактировать заявку' : 'Новая заявка'}</DialogTitle>
+                                    </DialogHeader>
+                                    <RequestForm
+                                        key={currentRequest ? currentRequest.requestID : 'new'}
+                                        currentRequest={currentRequest}
+                                        onSubmit={handleFormSubmit}
+                                        onCancel={() => setIsFormOpen(false)}
+                                        apiError={formApiError}
+                                        shops={shops}
+                                        workCategories={workCategories}
+                                        urgencyCategories={urgencyCategories}
+                                        contractors={contractors}
+                                        isSubmitting={isSubmitting}
+                                    />
+                                </DialogContent>
+                            </Dialog>
+                        </>
                     )}
                 </div>
 

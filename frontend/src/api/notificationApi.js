@@ -53,7 +53,12 @@ export const generateCronExpression = (type, hour = 9, minute = 0, dayOfWeek = 1
 }
 
 export const parseCronExpression = (cronExpression) => {
-  const parts = cronExpression.split(' ')
+  if (!cronExpression) return null;
+
+  // Используем trim и split по регулярке (любое количество пробелов), 
+  // чтобы избежать ошибок из-за двойных пробелов
+  const parts = cronExpression.trim().split(/\s+/)
+  
   if (parts.length !== 5) return null
 
   const [minute, hour, dayOfMonth, month, dayOfWeek] = parts

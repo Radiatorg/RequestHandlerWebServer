@@ -604,12 +604,13 @@ public class RequestService {
     }
 
     public Mono<Void> addPhotosToRequest(Integer requestId, Flux<FilePart> filePartFlux, Integer userId) {
+        // 1. Конвертация потока файлов в байты (оставляем как было)
         Flux<byte[]> imagesDataFlux = filePartFlux.flatMap(filePart ->
                 filePart.content()
                         .collectList()
                         .mapNotNull(dataBuffers -> {
                             if (dataBuffers.isEmpty()) return null;
-                            DataBuffer joinedBuffer = dataBuffers.getFirst().factory().join(dataBuffers);
+                            DataBuffer joinedBuffer = dataBuffers.get(0).factory().join(dataBuffers);
                             dataBuffers.forEach(buffer -> {
                                 if (buffer != joinedBuffer) DataBufferUtils.release(buffer);
                             });
@@ -633,39 +634,44 @@ public class RequestService {
 
                     return canUserModify(request, user).flatMap(canModify -> {
                         if (!canModify) return Mono.error(new OperationNotAllowedException("Нет прав"));
-                        if ("Closed".equalsIgnoreCase(request.getStatus())) return Mono.error(new OperationNotAllowedException("Заявка закрыта"));
+                        if ("Closed".equalsIgnoreCase(request.getStatus()))
+                            return Mono.error(new OperationNotAllowedException("Заявка закрыта"));
 
-                        return chatRepository.findTelegramIdByRequestId(requestId)
-                                .flatMap(chatId -> {
-                                    String author = notificationService.escapeMarkdown(user.getLogin());
+                        // === ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ===
+                        // Мы итерируемся по картинкам и сохраняем их НЕЗАВИСИМО от наличия чата
+                        return imagesDataFlux.flatMap(imageData -> {
+                            RequestPhoto photo = new RequestPhoto();
+                            photo.setRequestID(requestId);
+                            photo.setImageData(imageData);
 
-                                    String caption = String.format(
-                                            "📷 *Новое фото к заявке \\#%d*\n👤 *Добавил:* %s",
-                                            requestId, author
-                                    );
-
-                                    return imagesDataFlux.flatMap(imageData -> {
-                                        RequestPhoto photo = new RequestPhoto();
-                                        photo.setRequestID(requestId);
-                                        photo.setImageData(imageData);
-
-                                        // ИЗМЕНЕНИЕ ЗДЕСЬ:
-                                        return photoRepository.save(photo)
-                                                .flatMap(saved -> notificationService.sendPhoto(chatId, caption, imageData)
-                                                        // Если телеграм упал - игнорируем ошибку, чтобы фронт получил ОК
-                                                        .onErrorResume(e -> {
-                                                            System.err.println("Ошибка отправки фото в Telegram: " + e.getMessage());
-                                                            return Mono.empty();
-                                                        })
-                                                        .thenReturn(saved)
-                                                );
-                                    }).then();
-                                });
+                            // 1. Сохраняем фото в БД
+                            return photoRepository.save(photo)
+                                    .flatMap(savedPhoto -> {
+                                        // 2. Пытаемся найти чат и отправить уведомление
+                                        return chatRepository.findTelegramIdByRequestId(requestId)
+                                                .flatMap(chatId -> {
+                                                    String author = notificationService.escapeMarkdown(user.getLogin());
+                                                    String caption = String.format(
+                                                            "📷 *Новое фото к заявке \\#%d*\n👤 *Добавил:* %s",
+                                                            requestId, author
+                                                    );
+                                                    // Отправляем в телеграм
+                                                    return notificationService.sendPhoto(chatId, caption, imageData);
+                                                })
+                                                // Если чат не найден — просто игнорируем (фото уже сохранено)
+                                                .switchIfEmpty(Mono.empty())
+                                                // Если ошибка отправки в телеграм — логируем и идем дальше
+                                                .onErrorResume(e -> {
+                                                    System.err.println("Ошибка отправки фото в Telegram: " + e.getMessage());
+                                                    return Mono.empty();
+                                                });
+                                    });
+                        }).then(); // Ждем завершения обработки всех фото
+                        // === ИСПРАВЛЕНИЕ ЗАКОНЧИЛОСЬ ===
                     });
                 })
                 .then();
     }
-
 
     public Mono<RequestResponse> completeRequest(Integer requestId, Integer contractorId) {
         return requestRepository.findById(requestId)
@@ -703,9 +709,61 @@ public class RequestService {
                     if (!"Closed".equalsIgnoreCase(request.getStatus())) {
                         return Mono.error(new OperationNotAllowedException("Можно восстановить только закрытую заявку."));
                     }
+
+                    // 1. Меняем статус
                     request.setStatus("In work");
                     request.setClosedAt(null);
-                    return requestRepository.save(request);
+
+                    // 2. Получаем данные для расчета дедлайна (Срочность + Кастомные дни)
+                    Mono<UrgencyCategory> urgencyMono = urgencyCategoryRepository.findById(request.getUrgencyID());
+                    Mono<RequestCustomDay> customDayMono = customDayRepository.findByRequestID(requestId)
+                            .defaultIfEmpty(new RequestCustomDay()); // Чтобы не упало, если записи нет
+
+                    return Mono.zip(urgencyMono, customDayMono)
+                            .flatMap(tuple -> {
+                                UrgencyCategory urgency = tuple.getT1();
+                                RequestCustomDay customDay = tuple.getT2();
+
+                                // 3. Расчет просрочки
+                                Integer daysForTask = "Customizable".equalsIgnoreCase(urgency.getUrgencyName())
+                                        ? customDay.getDays()
+                                        : urgency.getDefaultDays();
+
+                                boolean isOverdue = false;
+                                long daysOverdue = 0;
+
+                                if (daysForTask != null) {
+                                    LocalDateTime deadline = request.getCreatedAt().plusDays(daysForTask);
+                                    isOverdue = LocalDateTime.now().isAfter(deadline);
+                                    if (isOverdue) {
+                                        daysOverdue = Duration.between(deadline, LocalDateTime.now()).toDays();
+                                        // Корректировка: если меньше суток, считаем как 1 день
+                                        daysOverdue = Math.max(1, daysOverdue);
+                                    }
+                                }
+
+                                request.setIsOverdue(isOverdue);
+
+                                // 4. Формирование сообщения
+                                StringBuilder msgBuilder = new StringBuilder();
+                                msgBuilder.append("🔄 *ЗАЯВКА \\#").append(requestId).append(" ВОССТАНОВЛЕНА*\n\n");
+                                msgBuilder.append("Статус: *Закрыта* ➡️ *В работе*");
+
+                                if (isOverdue) {
+                                    msgBuilder.append("\n\n⚠️ *Обратите внимание:* Заявка просрочена на *")
+                                            .append(daysOverdue)
+                                            .append(" дн\\.*");
+                                }
+
+                                String finalMessage = msgBuilder.toString();
+
+                                // 5. Сохранение и отправка уведомления
+                                return requestRepository.save(request)
+                                        .flatMap(savedReq -> chatRepository.findTelegramIdByRequestId(requestId)
+                                                .flatMap(chatId -> notificationService.sendNotification(chatId, finalMessage))
+                                                .onErrorResume(e -> Mono.empty()) // Если ошибка отправки, не ломаем процесс
+                                                .thenReturn(savedReq));
+                            });
                 })
                 .flatMap(savedRequest -> enrichRequest(savedRequest.getRequestID()));
     }
